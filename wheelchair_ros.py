@@ -1,10 +1,12 @@
 import rospy
 import threading
 import sys
+import signal
 
 from sensor_msgs.msg import Joy
 from can2RNET import *
 from time import sleep, time
+from std_msgs.msg import Int32
 
 # Global variables for joystick state
 joystick_X = 0
@@ -26,16 +28,23 @@ button_functions = {
 
 def signal_handler(sig, frame):
     """
-    Signal handler to stop the wheelchair controller.
+    Handles SIGINT (Ctrl+C) to cleanly exit the program.
 
-    :param sig: signal number
-    :param frame: current stack frame
+    :param sig: Signal number.
+    :param frame: Current stack frame.
     """
-    print("Interrupt signal received. Stopping wheelchair controller...")
-    global rnet_threads_running
+    global rnet_threads_running, can_socket
+    rospy.loginfo("Interrupt signal received. Stopping wheelchair controller...")
 
+    # Stop threads & processes
     rnet_threads_running = False
     rospy.signal_shutdown("Node closed...")
+
+    # Ensure CAN socket is closed properly
+    if can_socket:
+        can_socket.close()
+        rospy.loginfo("CAN socket closed.")
+
     sys.exit(0)
 
 
@@ -181,6 +190,8 @@ def read_battery_level(can_socket):
     frameid = ''
     timeout = time() + 1.1 # wait 1100ms until timeout
 
+    battery_level = 0
+
     while frameid[0:5] != '1c0c0':  # Battery level frame ID (no extended frame)
         cf, _ = can_socket.recvfrom(16) # Blocking if no CANBUS traffic
         candump_frame = dissect_frame(cf)
@@ -189,10 +200,6 @@ def read_battery_level(can_socket):
         if frameid[0:5] != '1c0c0':
             continue
         battery_level = int(candump_frame.split('#')[1], 16)
-        
-        if time() > timeout:
-            print("Battery level wait timed out...")
-            return TimeoutError
         
     return battery_level
 
@@ -209,7 +216,8 @@ def joystick_spoofing(can_socket):
 
     try:
         joystick_ID = wait_rnet_joystick_frame(can_socket)
-        rospy.loginfo(f"Found R-net joystick frame: {0}")
+        # joystick_ID = joystick_ID[:-1] + '1'
+        rospy.loginfo(f"Found R-net joystick frame: {joystick_ID}")
         if not disable_rnet_joystick(can_socket):
             rospy.logerr("Failed to disable R-net joystick. Aborting...")
             return
@@ -245,28 +253,31 @@ def play_beep(cansocket):
 def main():
     global rnet_threads_running
     global can_socket
+
+    signal.signal(signal.SIGINT, signal_handler)
     
     can_socket = opencansocket(0)
 
     # Initialize ROS node
     rospy.init_node("wheelchair_controller")
     rospy.Subscriber("/joy_input", Joy, joy_callback)
-    battery_level_publisher = rospy.Publisher("/battery_level", int, queue_size=1)
+    battery_level_publisher = rospy.Publisher("/battery_level", Int32, queue_size=1)
 
     try:
         joystick_spoofing(can_socket)
 
         while rnet_threads_running and not rospy.is_shutdown():
-            battery_level = read_battery_level(can_socket)
-            battery_level_publisher.publish(battery_level)
-            sleep(5)
+           battery_level = read_battery_level(can_socket)
+           battery_level_publisher.publish(battery_level)
+           sleep(5)
 
         rospy.spin()
     except rospy.ROSInterruptException:
         rospy.loginfo("Shutting down node...")
     finally:
         rnet_threads_running = False
-        can_socket.close()
+        if can_socket:
+            can_socket.close()
         rospy.loginfo("CAN socket closed.")
 
 
