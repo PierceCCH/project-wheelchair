@@ -2,7 +2,6 @@
 
 This repository contains the code and documentation for a teleoperable power wheelchair used as a platform for micromobility research. Any power wheelchair that uses the R-net control system can be modified to be teleoperable using the code and setup steps described in this repository.
 
-  ![networking_img](./images/networking.jpg)
 
 ## Table of Contents
 
@@ -65,8 +64,6 @@ The wheelchair platform has been setup by referencing the [can2RNET](https://git
 
 1. **PiCAN 2 Board**: Attach the PiCAN 2 board to the Raspberry Pi 4. The board should be connected to the GPIO pins of the Raspberry Pi.
 2. **R-net cable**: The R-net cable needs to be connected to the PiCAN 2 board. Cut and strip the cable to reveal the four conductors inside. Connect the conductors to the appropriate pins on the PiCAN 2 board.
-  
-  ![rnet-wiring](./images/rnet-wiring.png)
   
   ```
     RED -> +12V (optional without SMPS)
