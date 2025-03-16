@@ -80,7 +80,7 @@ def dissect_frame(frame):
     else:
         rtr = False
     can_idtxt = '{:08x}'.format(can_id & 0x1FFFFFFF)[-idl:]
-    return (can_idtxt + '#'+''.join(["%02X" % x for x in data[:can_dlc]]) + 'R'*rtr)
+    return (can_idtxt + '#'+''.join(["%02X" % x for x in data[:can_dlc]]) + 'R' * rtr)
 
 def cansend(s,cansendtxt):
     try:

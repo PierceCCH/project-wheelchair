@@ -18,12 +18,12 @@ joystick_Y = 0
 speed_level = 2
 battery_level = 0
 
-toggle_filter = False    # Flag to enable/disable CAN filtering. Always initialize to False
-filter_can_id = ["020"]  # CAN IDs to be filtered when toggle_filter is ON
+toggle_filter = False       # Flag to enable/disable CAN filtering. Always initialize to False
+filter_can_id = "02000100"  # CAN IDs to be filtered when toggle_filter is ON
 
 ### CAN sockets for communication
-can_mcu = None  # CAN0: Sends signals to wheelchair control module
-can_jsm = None      # CAN1: Receives signals from onboard joystick (JSM)
+can_jsm = None      # CAN0: Receives signals from onboard joystick (JSM)
+can_mcu = None      # CAN1: Sends signals to wheelchair control module
 
 ### Map button index to function name
 button_functions = {
@@ -60,6 +60,8 @@ def joy_callback(msg):
     """
     global joystick_X, joystick_Y, can_mcu
     try:
+        print("Received: ", joystick_X, joystick_Y)
+
         joystick_X = msg.axes[0]
         joystick_Y = msg.axes[1]
 
@@ -69,7 +71,7 @@ def joy_callback(msg):
     buttons_state = msg.buttons
     for button, function in button_functions.items():
         if buttons_state[button]:
-            print(f"Button {button} pressed: {function}")
+            rospy.loginfo(f"Button {button} pressed: {function}")
             if function == 'increase_speed':
                 set_speed_level(can_mcu, speed_level + 1)
             elif function == 'decrease_speed':
@@ -80,33 +82,37 @@ def joy_callback(msg):
                 global toggle_filter
                 toggle_filter = not toggle_filter
                 if toggle_filter:
-                    print("CAN filtering enabled.")
+                    rospy.loginfo("CAN filtering enabled.")
                 else:
-                    print("CAN filtering disabled.")
+                    rospy.loginfo("CAN filtering disabled.")
             else:
-                print(f"Button {button} function not implemented")
+                rospy.logerr(f"Button {button} function not implemented")
 
 
-def forward_can_messages(can_socket_in, can_socket_out):
+def forward_can(can_in, can_out, filter_can):
     """
-    Parses frames from can_socket_in and forwards them to can_socket_out.
+    Parses frames from can_in and forwards them to can_out.
 
-    :param can_socket_in: Socket for receiving frames from onboard joystick
-    :param can_socket_out: Socket for sending frames to wheelchair control module
+    :param can_in: Socket for receiving frames for forwarding
+    :param can_out: Socket for sending frames to module
     """
     global rnet_threads_running, toggle_filter
 
     while rnet_threads_running and not rospy.is_shutdown():
         try:
-            frame, _ = can_socket_in.recvfrom(16)
+            frame, _ = can_in.recvfrom(16)
             parsed_frame = dissect_frame(frame)
-
             frame_id = parsed_frame.split('#')[0]  # Extract CAN ID
-            if toggle_filter and frame_id not in filter_can_id:
-                rospy.loginfo(f"Filtered frame: {parsed_frame}")
-                continue
+            
+            if filter_can:
+                print("Filtering can")
+                print("Toggle filter: ", toggle_filter)
+                if toggle_filter and (frame_id == filter_can_id):
+                    rospy.loginfo(f"Filtered frame with ID {frame_id}: {parsed_frame}")
+                    continue
 
-            cansend(can_socket_out, parsed_frame)
+            can_out.send(frame)
+            rospy.loginfo(f"Forwarding | Frame with ID {frame_id}: {parsed_frame}")
         except Exception as e:
             rospy.logerr(f"Error in forwarding CAN messages: {e}")
 
@@ -118,21 +124,14 @@ def send_spoofed_frame(can_socket, joy_id):
     :param can_socket: socket for sending CAN messages
     :param joy_id: Joystick ID, used as a reference for sending joystick CAN messages
     """
-    mintime = 0.01
-    nexttime = time() + mintime
+
+    global rnet_threads_running, joystick_X, joystick_Y, toggle_filter
 
     while rnet_threads_running and not rospy.is_shutdown():
-        joyframe = joy_id + '#' + dec_to_hex(joystick_X, 2) + dec_to_hex(joystick_Y, 2)
-        print("Sending joystick_X: ", joystick_X, " joystick_Y: ", joystick_Y)
-
-        cansend(can_socket, joyframe)
-
-        nexttime += mintime
-        t = time()
-        if t < nexttime:
-            sleep(nexttime - t)
-        else:
-            nexttime += mintime
+        if toggle_filter:
+            joyframe = joy_id + '#' + dec_to_hex(joystick_X, 2) + dec_to_hex(joystick_Y, 2)
+            print("Sending joystick_X: ", joystick_X, " joystick_Y: ", joystick_Y)
+            cansend(can_socket, joyframe)
 
 
 def wait_rnet_joystick_frame(can_socket):
@@ -146,18 +145,18 @@ def wait_rnet_joystick_frame(can_socket):
     :throws: TimeoutError
     """
     frameid = ''
-    timeout = time() + 0.2 # wait 200ms until timeout
+    # timeout = time() + 2 # wait 200ms until timeout
 
-    while frameid[0:3] != '020':        # joystick frame ID
-        cf, _ = can_socket.recvfrom(16) # Blocking if no CANBUS traffic
-        candump_frame = dissect_frame(cf)
-        frameid = candump_frame.split('#')[0]
+    # while frameid[0:3] != '020':  # joystick frame ID (no extended frame)
+    #     cf, _ = can_socket.recvfrom(16) # Blocking if no CANBUS traffic
+    #     candump_frame = dissect_frame(cf)
+    #     frameid = candump_frame.split('#')[0]
         
-        if time() > timeout:
-            print("Joystick frame wait timed out...")
-            return TimeoutError
+    #     if time() > timeout:
+    #         print("Joystick frame wait timed out...")
+    #         return TimeoutError
         
-    return frameid
+    return "02000100"
 
 
 def joystick_spoofing(can_jsm, can_mcu):
@@ -165,7 +164,7 @@ def joystick_spoofing(can_jsm, can_mcu):
     Handles R-Net joystick spoofing.
 
     :param can_jsm: socket for receiving CAN messages from on board joystick
-    :param can_jsm: socket for sending CAN messages to wheelchair control module
+    :param can_mcu: socket for sending CAN messages to wheelchair control module
     """
     global rnet_threads_running
 
@@ -174,6 +173,7 @@ def joystick_spoofing(can_jsm, can_mcu):
     try:
         joystick_ID = wait_rnet_joystick_frame(can_jsm)
         rospy.loginfo(f"Found R-net joystick frame: {joystick_ID}")
+        sleep(10) # To make sure JSM fully boots up
 
         # Start thread to send joystick CAN frames
         spoof_thread = threading.Thread(
@@ -181,7 +181,7 @@ def joystick_spoofing(can_jsm, can_mcu):
             args=(can_mcu, joystick_ID), 
             daemon=True
         )
-        spoof_thread.start()
+        # spoof_thread.start()
 
         rospy.loginfo("Joystick spoofing started.")
 
@@ -218,8 +218,8 @@ def main():
 
     signal.signal(signal.SIGINT, signal_handler)
 
-    can_mcu = opencansocket(0)  # CAN0 for controlling the wheelchair
-    can_jsm = opencansocket(1)   # CAN1 for reading the onboard joystick
+    can_jsm = opencansocket(0)   # CAN0 for reading the onboard joystick
+    can_mcu = opencansocket(1)   # CAN1 for controlling the wheelchair
 
     if not can_mcu:
         rospy.logerr("Failed to open CAN out.")
@@ -234,18 +234,18 @@ def main():
     battery_level_publisher = rospy.Publisher("/battery_level", Int32, queue_size=1)
 
     ## Start threads for forwarding CAN messages
-    forward_jsm_to_mcu = threading.Thread(
-        target=forward_can_messages,
-        args=(can_jsm, can_mcu),
+    jsm_to_mcu = threading.Thread(
+        target=forward_can,
+        args=(can_jsm, can_mcu, True),
         daemon=True
     )
-    forward_mcu_to_jsm = threading.Thread(
-        target=forward_can_messages,
-        args=(can_mcu, can_jsm),
+    mcu_to_jsm = threading.Thread(
+        target=forward_can,
+        args=(can_mcu, can_jsm, False),
         daemon=True
     )
-    forward_jsm_to_mcu.start()
-    forward_mcu_to_jsm.start()
+    jsm_to_mcu.start()
+    mcu_to_jsm.start()
 
     try:
         joystick_spoofing(
@@ -253,10 +253,10 @@ def main():
             can_mcu=can_mcu
         )
 
-        while rnet_threads_running and not rospy.is_shutdown():
-            battery_level = read_battery_level(can_mcu)
-            battery_level_publisher.publish(battery_level)
-            sleep(5)
+       # while rnet_threads_running and not rospy.is_shutdown():
+       #     battery_level = read_battery_level(can_mcu)
+       #     battery_level_publisher.publish(battery_level)
+
         rospy.spin()
     except rospy.ROSInterruptException:
         rospy.loginfo("Shutting down node...")
