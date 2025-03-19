@@ -7,7 +7,6 @@ from sensor_msgs.msg import Joy
 from time import sleep
 from std_msgs.msg import Int32
 
-from button_callbacks import *
 from can2RNET import *
 
 rnet_threads_running = True
@@ -15,11 +14,12 @@ rnet_threads_running = True
 ### Global variables
 joystick_X = 0
 joystick_Y = 0
+button_states = []
 speed_level = 2
 battery_level = 0
 
 toggle_filter = False       # Flag to enable/disable CAN filtering. Always initialize to False
-filter_can_id = "02000100"  # CAN IDs to be filtered when toggle_filter is ON
+joystick_ID = "02000100"  # CAN IDs to be filtered when toggle_filter is ON
 
 ### CAN sockets for communication
 can_jsm = None      # CAN0: Receives signals from onboard joystick (JSM)
@@ -54,39 +54,21 @@ def signal_handler(sig, frame):
 
 def joy_callback(msg):
     """
-    Callback for the /joy_input topic to update joystick_X and joystick_Y, as well as handle button presses.
+    Callback for the /joy_input topic to update joystick_X, joystick_Y and button_states dictionary.
 
     :param msg: Joy message containing joystick axes
     """
-    global joystick_X, joystick_Y, can_mcu
+    global joystick_X, joystick_Y, button_states
     try:
         print("Received: ", joystick_X, joystick_Y)
 
-        joystick_X = msg.axes[0]
-        joystick_Y = msg.axes[1]
+        with lock:
+            joystick_X = msg.axes[0]
+            joystick_Y = msg.axes[1]
+            button_states = msg.buttons
 
     except IndexError:
         rospy.logerr("Joystick axes index out of range")
-    
-    buttons_state = msg.buttons
-    for button, function in button_functions.items():
-        if buttons_state[button]:
-            rospy.loginfo(f"Button {button} pressed: {function}")
-            if function == 'increase_speed':
-                set_speed_level(can_mcu, speed_level + 1)
-            elif function == 'decrease_speed':
-                set_speed_level(can_mcu, speed_level - 1)
-            elif function == 'horn':
-                play_beep(can_mcu)
-            elif function == 'toggle_model':
-                global toggle_filter
-                toggle_filter = not toggle_filter
-                if toggle_filter:
-                    rospy.loginfo("CAN filtering enabled.")
-                else:
-                    rospy.loginfo("CAN filtering disabled.")
-            else:
-                rospy.logerr(f"Button {button} function not implemented")
 
 
 def forward_can(can_in, can_out, filter_can):
@@ -96,7 +78,7 @@ def forward_can(can_in, can_out, filter_can):
     :param can_in: Socket for receiving frames for forwarding
     :param can_out: Socket for sending frames to module
     """
-    global rnet_threads_running, toggle_filter
+    global rnet_threads_running, toggle_filter, joystick_ID
 
     while rnet_threads_running and not rospy.is_shutdown():
         try:
@@ -107,86 +89,37 @@ def forward_can(can_in, can_out, filter_can):
             if filter_can:
                 print("Filtering can")
                 print("Toggle filter: ", toggle_filter)
-                if toggle_filter and (frame_id == filter_can_id):
+
+                if toggle_filter and (frame_id == joystick_ID):
                     rospy.loginfo(f"Filtered frame with ID {frame_id}: {parsed_frame}")
-                    continue
+                    joyframe = joystick_ID + '#' + dec_to_hex(joystick_X, 2) + dec_to_hex(joystick_Y, 2)
+                    print("Sending joystick_X: ", joystick_X, " joystick_Y: ", joystick_Y)
+                    frame=build_frame(joyframe)
+
+                    for button, function in button_functions.items():
+                        if button_states[button]:
+                            rospy.loginfo(f"Button {button} pressed: {function}")
+                            try:
+                                if function == 'increase_speed':
+                                    new_speed_level = speed_level + 1 # TODO: Fix race condition
+                                    set_speed_level(can_out, new_speed_level)
+                                    # set_speed_level(can_in, new_speed_level)
+                                elif function == 'decrease_speed':
+                                    new_speed_level = speed_level - 1
+                                    set_speed_level(can_out, new_speed_level)
+                                    # set_speed_level(can_in, new_speed_level)
+                                elif function == 'horn':
+                                    play_beep(can_out)
+                                else:
+                                    rospy.logerr(f"Button {button} function not implemented")
+                            except Exception as e:
+                                rospy.logerr(f"Error with button function: {e}")
 
             can_out.send(frame)
             rospy.loginfo(f"Forwarding | Frame with ID {frame_id}: {parsed_frame}")
+
         except Exception as e:
             rospy.logerr(f"Error in forwarding CAN messages: {e}")
-
-
-def send_spoofed_frame(can_socket, joy_id):
-    """
-    Publishes joystick CAN frame every 10ms.
-
-    :param can_socket: socket for sending CAN messages
-    :param joy_id: Joystick ID, used as a reference for sending joystick CAN messages
-    """
-
-    global rnet_threads_running, joystick_X, joystick_Y, toggle_filter
-
-    while rnet_threads_running and not rospy.is_shutdown():
-        if toggle_filter:
-            joyframe = joy_id + '#' + dec_to_hex(joystick_X, 2) + dec_to_hex(joystick_Y, 2)
-            print("Sending joystick_X: ", joystick_X, " joystick_Y: ", joystick_Y)
-            cansend(can_socket, joyframe)
-
-
-def wait_rnet_joystick_frame(can_socket):
-    """
-    Waits for a frame send by joystick. Extracts the frame ID and returns it.
-    If no frame is found within the timeout, 'Err!' is returned.
-
-    :param can_socket: socket for sending and receiving CAN messages
-
-    :return: Joystick frame extendedID
-    :throws: TimeoutError
-    """
-    frameid = ''
-    # timeout = time() + 2 # wait 200ms until timeout
-
-    # while frameid[0:3] != '020':  # joystick frame ID (no extended frame)
-    #     cf, _ = can_socket.recvfrom(16) # Blocking if no CANBUS traffic
-    #     candump_frame = dissect_frame(cf)
-    #     frameid = candump_frame.split('#')[0]
-        
-    #     if time() > timeout:
-    #         print("Joystick frame wait timed out...")
-    #         return TimeoutError
-        
-    return "02000100"
-
-
-def joystick_spoofing(can_jsm, can_mcu):
-    """
-    Handles R-Net joystick spoofing.
-
-    :param can_jsm: socket for receiving CAN messages from on board joystick
-    :param can_mcu: socket for sending CAN messages to wheelchair control module
-    """
-    global rnet_threads_running
-
-    rospy.loginfo("Waiting for R-net joystick frame...")
-
-    try:
-        joystick_ID = wait_rnet_joystick_frame(can_jsm)
-        rospy.loginfo(f"Found R-net joystick frame: {joystick_ID}")
-        sleep(10) # To make sure JSM fully boots up
-
-        # Start thread to send joystick CAN frames
-        spoof_thread = threading.Thread(
-            target=send_spoofed_frame, 
-            args=(can_mcu, joystick_ID), 
-            daemon=True
-        )
-        # spoof_thread.start()
-
-        rospy.loginfo("Joystick spoofing started.")
-
-    except TimeoutError:
-        rospy.logerr("No R-net joystick frame seen within timeout. Aborting...")
 
 
 def read_battery_level(can_socket):
@@ -211,6 +144,55 @@ def read_battery_level(can_socket):
         battery_level = int(candump_frame.split('#')[1], 16)
         
     return battery_level
+
+
+def dec_to_hex(dec, hexlen):
+    """
+    Convert dec to hex with leading 0s and no '0x' prefix.
+
+    :param dec: decimal number to convert
+    :param hexlen: length of the hex string
+
+    :returns: hex string
+    """
+    h=hex(int(dec))[2:]
+    l=len(h)
+    if h[l-1]=="L":
+        l-=1  #strip the 'L' that python int sticks on
+    if h[l-2]=="x":
+        h= '0'+hex(int(dec))[1:]
+    return ('0' * hexlen + h)[l:l + hexlen]
+
+
+def set_speed_level(cansocket, level):
+    """
+    Set the speed level of the wheelchair.
+    Levels are 0-4, with 0 being the slowest and 4 being the fastest.
+
+    :param cansocket: socket for sending CAN messages
+    :param level: speed level to set
+    """
+    global speed_level
+
+    if level >= 0 and level < 5:
+        speed_level = level
+        cansend(cansocket, '0a040100#' + dec_to_hex(level * 25, 2))
+    else:
+        print('Invalid RNET speed level: ' + str(level))
+
+
+def play_beep(cansocket):
+    """
+    Plays a short beep sound on the wheelchair.
+
+    :param cansocket: socket for sending CAN messages
+
+    :return: None
+    """
+    cansend(cansocket, "0C040100#")
+    cansend(cansocket, "0C040201#")
+    cansend(cansocket, "0C040201#")
+    cansend(cansocket, "0C040101#")
 
 
 def main():
@@ -248,11 +230,6 @@ def main():
     mcu_to_jsm.start()
 
     try:
-        joystick_spoofing(
-            can_jsm=can_jsm, 
-            can_mcu=can_mcu
-        )
-
        # while rnet_threads_running and not rospy.is_shutdown():
        #     battery_level = read_battery_level(can_mcu)
        #     battery_level_publisher.publish(battery_level)
