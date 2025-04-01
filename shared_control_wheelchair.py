@@ -15,8 +15,8 @@ lock = threading.Lock()
 ### Global variables
 joystick_X = 0
 joystick_Y = 0
-button_states = [0 for i in range(11)]
-speed_level = 2
+button_states = [0 for i in range(10)]
+speed_level = 0
 battery_level = 0
 
 joystick_ID = "02000100"  # CAN IDs to be filtered when toggle_filter is ON
@@ -24,6 +24,10 @@ joystick_ID = "02000100"  # CAN IDs to be filtered when toggle_filter is ON
 ### CAN sockets for communication
 can_jsm = None      # CAN0: Receives signals from onboard joystick (JSM)
 can_mcu = None      # CAN1: Sends signals to wheelchair control module
+
+### Publishers
+battery_level_publisher = None
+control_telem_publisher = None
 
 ### Map button index to function name
 button_functions = {
@@ -60,12 +64,18 @@ def joy_callback(msg):
     """
     global joystick_X, joystick_Y, button_states
     try:
-        print("Received: ", joystick_X, joystick_Y)
 
         with lock:
             joystick_X = msg.axes[0]
             joystick_Y = msg.axes[1]
-            button_states = msg.buttons
+
+            for i in range(len(button_states)):
+                if button_states[i]==0 and msg.buttons[i]==1:
+                    button_states[i]=1
+                if button_states[i]==2 and msg.buttons[i] ==0:
+                    button_states[i]=0
+
+            rospy.logger(f"Received gamepad input -- Axes: ({joystick_X}, {joystick_Y}) Buttons: {button_states}")
 
     except IndexError:
         rospy.logerr("Joystick axes index out of range")
@@ -87,6 +97,10 @@ def forward_can(can_in, can_out, thread_id):
             parsed_frame = dissect_frame(frame)
             frame_id = parsed_frame.split('#')[0]  # Extract CAN ID
 
+            if frame_id[0:5] == "1c0c0":           # Battery level frame ID
+                battery_level = int(parsed_frame.split('#')[1], 16)
+                battery_level_publisher.publish(battery_level)
+
             if frame_id == joystick_ID:
                 dec =  parsed_frame.split('#')[1]
 
@@ -99,56 +113,48 @@ def forward_can(can_in, can_out, thread_id):
                     rospy.loginfo(f"Sending joystick_X: {joystick_X} joystick_Y: {joystick_Y}")
                     frame=build_frame(joyframe)
 
+                    # Publish gamepad state
+                    control_telem = Joy()
+                    control_telem.axes = [joystick_X, joystick_Y]
+                    control_telem.buttons = button_states
+                    control_telem_publisher.publish(control_telem)
+
                     # Only 1 thread handles buttons to prevent duplicates
                     if thread_id == 0:
                         for button, function in button_functions.items():
-                            if button_states[button]:
+                            if button_states[button] == 1:
                                 rospy.loginfo(f"Button {button} pressed: {function}")
                                 try:
                                     if function == 'increase_speed':
-                                        new_speed_level = speed_level + 1 # TODO: Fix race condition
+                                        new_speed_level = speed_level + 1
                                         set_speed_level(can_out, new_speed_level)
-                                        # set_speed_level(can_in, new_speed_level)
+                                        set_speed_level(can_in, new_speed_level)
                                     elif function == 'decrease_speed':
                                         new_speed_level = speed_level - 1
                                         set_speed_level(can_out, new_speed_level)
-                                        # set_speed_level(can_in, new_speed_level)
+                                        set_speed_level(can_in, new_speed_level)
                                     elif function == 'horn':
                                         play_beep(can_out)
+                                        play_beep(can_in)
                                     else:
                                         rospy.logerr(f"Button {button} function not implemented")
+                                    button_states[button] = 2
                                 except Exception as e:
                                     rospy.logerr(f"Error with button function: {e}")
+                else:
+                    # Publish state of JSM, ignoring button_states
+                    try:
+                        control_telem = Joy()
+                        control_telem.axes = [input_x, input_y]
+                        control_telem.buttons = [0 for i in range(10)]
+                        control_telem_publisher.publish(control_telem)
+                    except Exception as e:
+                        rospy.logerr("Error publishing control state")
 
             parsed_frame = dissect_frame(frame)
             can_out.send(frame)
-            rospy.loginfo(f"Forwarding | Frame with ID {frame_id}: {parsed_frame}")
         except Exception as e:
-            rospy.logerr(f"Error in forwarding CAN messages: {e}")
-
-
-def read_battery_level(can_socket):
-    """
-    Waits for a frame and reads the battery level of the wheelchair.
-
-    :param can_socket: socket for sending CAN messages
-
-    :returns: battery level in percentage
-    """
-    frameid = ''
-
-    battery_level = 0
-
-    while frameid[0:5] != '1c0c0':      # Battery level frame ID (no extended frame)
-        cf, _ = can_socket.recvfrom(16) # Blocking if no CANBUS traffic
-        candump_frame = dissect_frame(cf)
-        frameid = candump_frame.split('#')[0]
-
-        if frameid[0:5] != '1c0c0':
-            continue
-        battery_level = int(candump_frame.split('#')[1], 16)
-        
-    return battery_level
+            rospy.logerr(f"Error in forwarding CAN messages: {e}")            
 
 
 def hex_to_dec(hex_str):
@@ -221,7 +227,7 @@ def play_beep(cansocket):
 
 
 def main():
-    global rnet_threads_running, can_mcu, can_jsm
+    global rnet_threads_running, can_mcu, can_jsm, battery_level_publisher, control_telem_publisher
 
     signal.signal(signal.SIGINT, signal_handler)
 
@@ -238,7 +244,9 @@ def main():
 
     rospy.init_node("wheelchair_controller")
     rospy.Subscriber("/joy_input", Joy, joy_callback)
-    battery_level_publisher = rospy.Publisher("/battery_level", Int32, queue_size=1)
+
+    battery_level_publisher = rospy.Publisher("/battery_level", Int32, queue_size=1)    # Shows battery level of wheelchair in percentage
+    control_telem_publisher = rospy.Publisher("/control_telem", Joy, queue_size=1)      # Joystick and button states, for logging
 
     ## Start threads for forwarding CAN messages
     jsm_to_mcu = threading.Thread(
@@ -254,12 +262,9 @@ def main():
     jsm_to_mcu.start()
     mcu_to_jsm.start()
 
-    try:
-       # while rnet_threads_running and not rospy.is_shutdown():
-       #     battery_level = read_battery_level(can_mcu)
-       #     battery_level_publisher.publish(battery_level)
 
-        rospy.spin()
+    try:
+        rospy.spin()    # Keep ros node running
     except rospy.ROSInterruptException:
         rospy.loginfo("Shutting down node...")
     finally:
