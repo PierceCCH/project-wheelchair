@@ -16,7 +16,7 @@ lock = threading.Lock()
 joystick_X = 0
 joystick_Y = 0
 button_states = [0 for i in range(10)]
-speed_level = 0
+speed_level = 2
 battery_level = 0
 
 joystick_ID = "02000100"  # CAN IDs to be filtered when toggle_filter is ON
@@ -35,6 +35,7 @@ button_functions = {
     1: 'toggle_model', # Not used in this file
     4: 'decrease_speed',
     5: 'increase_speed',
+    6: 'stop'
 }
 
 
@@ -136,6 +137,8 @@ def forward_can(can_in, can_out, thread_id):
                                     elif function == 'horn':
                                         play_beep(can_out)
                                         play_beep(can_in)
+                                    elif function == 'stop':
+                                        stop_can()
                                     else:
                                         rospy.logerr(f"Button {button} function not implemented")
                                     button_states[button] = 2
@@ -224,6 +227,25 @@ def play_beep(cansocket):
     cansend(cansocket, "0C040201#")
     cansend(cansocket, "0C040201#")
     cansend(cansocket, "0C040101#")
+
+
+def stop_can():
+    global rnet_threads_running, can_mcu, can_jsm
+    rospy.loginfo("!!! EMERGENCY STOP !!!")
+    play_beep(can_mcu)
+    play_beep(can_jsm)
+
+    rnet_threads_running = False
+    rospy.signal_shutdown("Node closed...")
+
+    if can_mcu:
+        can_mcu.close()
+        rospy.loginfo("CAN0 socket closed.")
+    if can_jsm:
+        can_jsm.close()
+        rospy.loginfo("CAN1 socket closed.")
+
+    sys.exit(0)
 
 
 def main():
