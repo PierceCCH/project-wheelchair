@@ -75,7 +75,7 @@ def joy_callback(msg):
                 if button_states[i]==2 and msg.buttons[i] ==0:
                     button_states[i]=0
 
-            rospy.logger(f"Received gamepad input -- Axes: ({joystick_X}, {joystick_Y}) Buttons: {button_states}")
+            rospy.loginfo(f"Received gamepad input -- Axes: ({joystick_X}, {joystick_Y}) Buttons: {button_states}")
 
     except IndexError:
         rospy.logerr("Joystick axes index out of range")
