@@ -8,6 +8,7 @@ This repository contains the code and documentation for a teleoperable power whe
   - [Table of Contents](#table-of-contents)
 - [Usage](#usage)
   - [Initialization](#initialization)
+    - [Published Topics](#published-topics)
   - [Controls](#controls)
   - [Charging the wheelchair](#charging-the-wheelchair)
   - [Common troubleshooting steps](#common-troubleshooting-steps)
@@ -29,7 +30,7 @@ This repository contains the code and documentation for a teleoperable power whe
 
 ## Initialization
 
-1. Power on the Raspberry Pi by connecting it to a power bank. The LEDs on the RPi should light up.
+1. Power on the Raspberry Pi. The LEDs on the RPi and IMU should light up.
 2. Connect the ethernet cable from the Raspberry Pi to the laptop running the ROS master node.
 3. Connect the Xbox gamepad to the laptop.
 4. In the meantime, start programs on the laptop:
@@ -42,6 +43,10 @@ This repository contains the code and documentation for a teleoperable power whe
        ```bash
        roscore
        ```
+     - Script to run data collection, IMU node and camera streamer:
+        ```bash
+        ./launch_data_collection.sh <EXP_NAME>
+        ```  
      - For each of the following commands, open a new terminal window and run the command in the Docker container:
        - For simple teleoperation using gamepad, without data collection functionality:
          ```bash
@@ -50,10 +55,6 @@ This repository contains the code and documentation for a teleoperable power whe
        - For streaming RGB-D camera data. **This is needed for data collection and inference**:
          ```bash
          python zed_streamer.py
-         ```
-       - For data collection:
-         ```bash
-         python expert_data_collection.py <EXP_NAME>
          ```
        - For testing trained BC model on the wheelchair:
          ```bash
@@ -71,12 +72,19 @@ This repository contains the code and documentation for a teleoperable power whe
        docker start wheelchairpi
        docker exec -it wheelchairpi bash
        ```
-     - Run the shared control node:
+     - Run the start script. Starts shared control node and IMU node. Make sure *roscore* is running on the laptop:
        ```bash
-       python3 shared_control_wheelchair.py
+       ./launch
        ```
      - After running the above python script, turn the wheelchair on. This can only be done after the shared control node is running, as it is needed for forwarding CAN messages.
 
+### Published Topics
+All topics are timestamped using the system time of the laptop running the ROS master node. System time is synced using **chrony**, so the timestamps should be consistent across all topics.
+
+- **/imu/data**: IMU data from the wheelchair.
+- **/joy_input**: Teleoperation commands from the Xbox controller.
+- **/is_human**: Boolean indicating if the wheelchair is being controlled by a human or AI.
+- **/control_telem**: Joystick commands from the wheelchair joystick module (JSM).
 
 ## Controls
 
